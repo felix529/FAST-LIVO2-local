@@ -127,6 +127,19 @@ set(dependencies
 )
 
 set(COMMON_DEPENDENCIES OpenMP::OpenMP_CXX fmt::fmt)
+# Find Vikit libraries automatically
+find_library(VIKIT_COMMON_LIBRARY
+  NAMES vikit_common
+  REQUIRED
+)
+
+find_library(VIKIT_ROS_LIBRARY
+  NAMES vikit_ros
+  REQUIRED
+)
+
+message(STATUS "VIKIT_COMMON_LIBRARY: ${VIKIT_COMMON_LIBRARY}")
+message(STATUS "VIKIT_ROS_LIBRARY: ${VIKIT_ROS_LIBRARY}")
 
 # link_directories(${COMMON_DEPENDENCIES}
 #   ${vikit_common_LIBRARIES}/libvikit_common.so
@@ -149,8 +162,8 @@ ament_target_dependencies(laser_mapping ${dependencies})
 
 # linking libraries or executables to public dependencies
 target_link_libraries(laser_mapping 
-    ${CMAKE_SOURCE_DIR}/../../install/vikit_common/lib/libvikit_common.so 
-    ${CMAKE_SOURCE_DIR}/../../install/vikit_ros/lib/libvikit_ros.so
+    ${VIKIT_COMMON_LIBRARY} 
+    ${CMAKE_ROS_LIBRARY}
     ${COMMON_DEPENDENCIES}
 )
 target_link_libraries(vio ${COMMON_DEPENDENCIES})
@@ -174,6 +187,10 @@ target_link_libraries(fastlivo_mapping
   ${OpenCV_LIBRARIES}
   ${Sophus_LIBRARIES}
   ${Boost_LIBRARIES}
+  fmt::fmt
+  Boost::filesystem
+  ${VIKIT_ROS_LIBRARY}
+  ${VIKIT_COMMON_LIBRARY}
 )
 
 # Link mimalloc if found
