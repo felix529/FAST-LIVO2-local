@@ -18,6 +18,7 @@ def generate_launch_description():
 
     mapping_params_file = LaunchConfiguration("mapping_params_file")
     camera_params_file = LaunchConfiguration("camera_params_file")
+    mapping_prefix = LaunchConfiguration("mapping_prefix")
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -35,18 +36,17 @@ def generate_launch_description():
             default_value=default_camera_config,
             description="Full path to the camera parameter file",
         ),
-        Node(
-            package="demo_nodes_cpp",
-            executable="parameter_blackboard",
-            name="parameter_blackboard",
-            parameters=[camera_params_file],
-            output="screen",
+        DeclareLaunchArgument(
+            "mapping_prefix",
+            default_value="",
+            description="Optional command prefix, for example valgrind",
         ),
         Node(
             package="fast_livo",
             executable="fastlivo_mapping",
             name="laserMapping",
-            parameters=[mapping_params_file],
+            parameters=[mapping_params_file, camera_params_file],
+            prefix=mapping_prefix,
             output="screen",
         ),
         Node(

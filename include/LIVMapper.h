@@ -26,6 +26,7 @@ which is included as part of this source code package.
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <vikit/camera_loader.h>
+#include <chrono>
 
 class LIVMapper
 {
@@ -72,7 +73,6 @@ public:
   std::condition_variable sig_buffer;
 
   SLAM_MODE slam_mode_;
-  std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> voxel_map;
   
   string root_dir;
   string lid_topic, imu_topic, seq_name, img_topic;
@@ -190,5 +190,15 @@ public:
   double aver_time_icp = 0;
   double aver_time_map_inre = 0;
   bool colmap_output_en = false;
+
+private:
+  void logMemoryStats();
+  bool memory_stats_enabled_ = true;
+  bool memory_stats_detailed_ = false;
+  double memory_stats_interval_sec_ = 5.0;
+  bool lru_enabled_ = true;
+  int64_t lidar_lru_capacity_ = 30000;
+  int64_t visual_lru_capacity_ = 2000;
+  std::chrono::steady_clock::time_point next_memory_stats_{};
 };
 #endif

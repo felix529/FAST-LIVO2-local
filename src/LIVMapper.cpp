@@ -12,6 +12,8 @@ which is included as part of this source code package.
 
 #include "LIVMapper.h"
 #include <vikit/camera_loader.h>
+#include <cmath>
+#include <stdexcept>
 
 using namespace Sophus;
 LIVMapper::LIVMapper(rclcpp::Node::SharedPtr &node, std::string node_name)
@@ -39,8 +41,11 @@ LIVMapper::LIVMapper(rclcpp::Node::SharedPtr &node, std::string node_name)
   pcl_wait_pub.reset(new PointCloudXYZI());
   pcl_wait_save.reset(new PointCloudXYZRGB());
   pcl_wait_save_intensity.reset(new PointCloudXYZI());
-  voxelmap_manager.reset(new VoxelMapManager(voxel_config, voxel_map));
+  voxelmap_manager.reset(new VoxelMapManager(voxel_config));
   vio_manager.reset(new VIOManager());
+  voxelmap_manager->configureLru(lru_enabled_, static_cast<std::size_t>(lidar_lru_capacity_));
+  vio_manager->configureLru(lru_enabled_, static_cast<std::size_t>(visual_lru_capacity_));
+  vio_manager->lidar_voxel_size = voxel_config.max_voxel_size_;
   root_dir = ROOT_DIR;
   initializeFiles();
   initializeComponents(this->node);          // initialize components errors
@@ -52,6 +57,45 @@ LIVMapper::~LIVMapper() {}
 
 void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
 {
+  rcl_interfaces::msg::ParameterDescriptor memory_stats_descriptor;
+  memory_stats_descriptor.read_only = true; // Configure once, before frame processing starts.
+  memory_stats_enabled_ = node->declare_parameter<bool>("memory_stats.enabled", true, memory_stats_descriptor);
+  memory_stats_detailed_ = node->declare_parameter<bool>("memory_stats.detailed", false, memory_stats_descriptor);
+  memory_stats_interval_sec_ = node->declare_parameter<double>("memory_stats.interval_sec", 5.0, memory_stats_descriptor);
+  if (!std::isfinite(memory_stats_interval_sec_) || memory_stats_interval_sec_ <= 0.0)
+  {
+    throw std::invalid_argument("memory_stats.interval_sec must be finite and positive");
+  }
+
+  rcl_interfaces::msg::ParameterDescriptor lru_descriptor;
+  lru_descriptor.read_only = true;
+  lru_enabled_ = node->declare_parameter<bool>("lru.enabled", true, lru_descriptor);
+  lidar_lru_capacity_ = node->declare_parameter<int64_t>("lru.lidar_capacity", 30000, lru_descriptor);
+  visual_lru_capacity_ = node->declare_parameter<int64_t>("lru.visual_capacity", 2000, lru_descriptor);
+  if (lru_enabled_ && (lidar_lru_capacity_ <= 0 || visual_lru_capacity_ <= 0))
+  {
+    throw std::invalid_argument("enabled LRU capacities must be greater than zero");
+  }
+
+  // Camera parameters are loaded directly into this node by the ROS2 launch
+  // file. This avoids a startup race with a separate parameter blackboard.
+  this->node->declare_parameter<std::string>("cam_model", "");
+  this->node->declare_parameter<std::string>("cam_calib_file", "");
+  this->node->declare_parameter<int>("cam_width", 0);
+  this->node->declare_parameter<int>("cam_height", 0);
+  this->node->declare_parameter<double>("scale", 1.0);
+  this->node->declare_parameter<double>("cam_fx", 0.0);
+  this->node->declare_parameter<double>("cam_fy", 0.0);
+  this->node->declare_parameter<double>("cam_cx", 0.0);
+  this->node->declare_parameter<double>("cam_cy", 0.0);
+  this->node->declare_parameter<double>("cam_d0", 0.0);
+  this->node->declare_parameter<double>("cam_d1", 0.0);
+  this->node->declare_parameter<double>("cam_d2", 0.0);
+  this->node->declare_parameter<double>("cam_d3", 0.0);
+  this->node->declare_parameter<double>("k1", 0.0);
+  this->node->declare_parameter<double>("k2", 0.0);
+  this->node->declare_parameter<double>("k3", 0.0);
+  this->node->declare_parameter<double>("k4", 0.0);
   // declare parameters
   this->node->declare_parameter<std::string>("common.lid_topic", "/livox/lidar");
   this->node->declare_parameter<std::string>("common.imu_topic", "/livox/imu");
@@ -158,6 +202,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("preprocess.scan_line", p_pre->N_SCANS);
   this->node->get_parameter("preprocess.point_filter_num", p_pre->point_filter_num);
   this->node->get_parameter("preprocess.feature_extract_enabled", p_pre->feature_enabled);
+  p_pre->blind_sqr = p_pre->blind * p_pre->blind;
 
   this->node->get_parameter("pcd_save.interval", pcd_save_interval);
   this->node->get_parameter("pcd_save.pcd_save_en", pcd_save_en);
@@ -191,7 +236,12 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   voxelmap_manager->extT_ << VEC_FROM_ARRAY(extrinT);
   voxelmap_manager->extR_ << MAT_FROM_ARRAY(extrinR);
 
-  if (!vk::camera_loader::loadFromRosNs(this->node, "parameter_blackboard", vio_manager->cam)) throw std::runtime_error("Camera model not correctly specified.");
+  vk::AbstractCamera *loaded_camera = nullptr;
+  if (!vk::camera_loader::loadFromRosNs(this->node, "parameter_blackboard", loaded_camera))
+  {
+    throw std::runtime_error("Camera model not correctly specified in camera_params_file.");
+  }
+  vio_manager->takeCameraOwnership(loaded_camera);
 
   vio_manager->grid_size = grid_size;
   vio_manager->patch_size = patch_size;
@@ -606,6 +656,8 @@ void LIVMapper::run(rclcpp::Node::SharedPtr &node)
   while (rclcpp::ok()) 
   {
     rclcpp::spin_some(this->node);
+    // Also report while synchronization is waiting, when input queues may grow.
+    logMemoryStats();
     if (!sync_packages(LidarMeasures)) 
     {
       rate.sleep();
@@ -620,6 +672,67 @@ void LIVMapper::run(rclcpp::Node::SharedPtr &node)
     stateEstimationAndMapping();
   }
   savePCD();
+}
+
+void LIVMapper::logMemoryStats()
+{
+  if (!memory_stats_enabled_) return;
+  const auto now = std::chrono::steady_clock::now();
+  if (now < next_memory_stats_) return;
+
+  std::size_t lidar_queue, imu_queue, image_queue, prop_imu_queue;
+  {
+    std::lock_guard<std::mutex> lock(mtx_buffer);
+    lidar_queue = lid_raw_data_buffer.size();
+    imu_queue = imu_buffer.size();
+    image_queue = img_buffer.size();
+  }
+  {
+    std::lock_guard<std::mutex> lock(mtx_buffer_imu_prop);
+    prop_imu_queue = prop_imu_buffer.size();
+  }
+
+  // Kernel-reported process RSS. -1 means unavailable; this is not a map estimate.
+  long rss_kib = -1;
+  std::ifstream status("/proc/self/status");
+  std::string line;
+  while (std::getline(status, line))
+  {
+    if (line.compare(0, 6, "VmRSS:") == 0)
+    {
+      std::istringstream value(line.substr(6));
+      value >> rss_kib;
+      break;
+    }
+  }
+
+  RCLCPP_INFO(this->node->get_logger(),
+      "[Memory] rss_kib=%ld lidar_roots=%zu visual_voxels=%zu warp_entries=%zu "
+      "lru[enabled=%d lidar_capacity=%zu visual_capacity=%zu lidar_evictions=%zu visual_evictions=%zu] "
+      "local_queues[lidar=%zu imu=%zu image=%zu prop_imu=%zu] "
+      "path_poses=%zu pcd_rgb_points=%zu pcd_intensity_points=%zu pending_color_points=%zu",
+      rss_kib, voxelmap_manager->voxel_map_.size(), vio_manager->feat_map.size(), vio_manager->warp_map.size(),
+      lru_enabled_, voxelmap_manager->voxel_map_.capacity(), vio_manager->feat_map.capacity(),
+      voxelmap_manager->voxel_map_.evictionCount(), vio_manager->feat_map.evictionCount(),
+      lidar_queue, imu_queue, image_queue, prop_imu_queue, path.poses.size(),
+      pcl_wait_save->size(), pcl_wait_save_intensity->size(), pcl_wait_pub->size());
+
+  if (memory_stats_detailed_)
+  {
+    // Called only between processing steps, never inside an OpenMP reader loop.
+    const auto lidar = voxelmap_manager->collectMemoryStats();
+    const auto visual = vio_manager->collectMemoryStats();
+    const double elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - now).count();
+    RCLCPP_INFO(this->node->get_logger(),
+        "[MemoryDetail] octree_nodes=%zu planes=%zu lidar_buffered_points=%zu lidar_point_capacity=%zu "
+        "visual_points=%zu observations=%zu patches=%zu patch_bytes=%zu "
+        "reference_image_allocations=%zu reference_image_bytes=%zu snapshot_ms=%.3f",
+        lidar.octree_nodes, lidar.planes, lidar.buffered_points, lidar.buffered_point_capacity,
+        visual.points, visual.observations, visual.patches, visual.patch_bytes,
+        visual.image_allocations, visual.image_bytes, elapsed_ms);
+  }
+  next_memory_stats_ = std::chrono::steady_clock::now() +
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(memory_stats_interval_sec_));
 }
 
 void LIVMapper::prop_imu_once(StatesGroup &imu_prop_state, const double dt, V3D acc_avr, V3D angvel_avr)

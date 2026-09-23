@@ -14,13 +14,18 @@ which is included as part of this source code package.
 #define VOXEL_MAP_H_
 
 #include "common_lib.h"
+#include "lru_map.h"
+#include "memory_stats.h"
 #include <Eigen/Dense>
+#include <cmath>
 #include <fstream>
 #include <math.h>
+#include <memory>
 #include <mutex>
 #include <omp.h>
 #include <pcl/common/io.h>
 #include <rclcpp/rclcpp.hpp>
+#include <stdexcept>
 #include <thread>
 #include <unistd.h>
 #include <unordered_map>
@@ -117,6 +122,19 @@ template <> struct hash<VOXEL_LOCATION>
 };
 } // namespace std
 
+inline int64_t voxelCoordinate(const double coordinate, const double voxel_size)
+{
+  if (!(voxel_size > 0.0) || !std::isfinite(voxel_size))
+    throw std::invalid_argument("voxel size must be finite and positive");
+  return static_cast<int64_t>(std::floor(coordinate / voxel_size));
+}
+
+inline VOXEL_LOCATION voxelLocation(const V3D &point, const double voxel_size)
+{
+  return VOXEL_LOCATION(voxelCoordinate(point.x(), voxel_size), voxelCoordinate(point.y(), voxel_size),
+                        voxelCoordinate(point.z(), voxel_size));
+}
+
 struct DS_POINT
 {
   float xyz[3];
@@ -131,11 +149,13 @@ class VoxelOctoTree
 
 public:
   VoxelOctoTree() = default;
+  VoxelOctoTree(const VoxelOctoTree &) = delete;
+  VoxelOctoTree &operator=(const VoxelOctoTree &) = delete;
   std::vector<pointWithVar> temp_points_;
-  VoxelPlane *plane_ptr_;
+  VoxelPlane *plane_ptr_ = nullptr;
   int layer_;
   int octo_state_; // 0 is end of tree, 1 is not
-  VoxelOctoTree *leaves_[8];
+  VoxelOctoTree *leaves_[8] = {};
   double voxel_center_[3]; // x, y, z
   std::vector<int> layer_init_num_;
   float quater_length_;
@@ -182,16 +202,21 @@ public:
   VoxelOctoTree *Insert(const pointWithVar &pv);
 };
 
+// Own the root octrees; pointers returned by get() are borrowed by frame processing.
+using VoxelMap = LruMap<VOXEL_LOCATION, VoxelOctoTree>;
+
 void loadVoxelConfig(rclcpp::Node::SharedPtr &node, VoxelMapConfig &voxel_config);
 
 class VoxelMapManager
 {
 public:
   VoxelMapManager() = default;
+  VoxelMapManager(const VoxelMapManager &) = delete;
+  VoxelMapManager &operator=(const VoxelMapManager &) = delete;
   VoxelMapConfig config_setting_;
   int current_frame_id_ = 0;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr voxel_map_pub_;
-  std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> voxel_map_;
+  VoxelMap voxel_map_;
 
   PointCloudXYZI::Ptr feats_undistort_;
   PointCloudXYZI::Ptr feats_down_body_;
@@ -217,14 +242,19 @@ public:
   std::vector<pointWithVar> pv_list_;
   std::vector<PointToPlane> ptpl_list_;
 
-  VoxelMapManager(VoxelMapConfig &config_setting, std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &voxel_map)
-      : config_setting_(config_setting), voxel_map_(voxel_map)
+  explicit VoxelMapManager(const VoxelMapConfig &config_setting)
+      : config_setting_(config_setting)
   {
     current_frame_id_ = 0;
     feats_undistort_.reset(new PointCloudXYZI());
     feats_down_body_.reset(new PointCloudXYZI());
     feats_down_world_.reset(new PointCloudXYZI());
   };
+
+  void configureLru(bool enabled, std::size_t capacity) { voxel_map_.configure(enabled, capacity); }
+  std::size_t pruneLru() { return voxel_map_.prune(); }
+  VoxelOctoTree *findVoxel(const V3D &point);
+  const VoxelOctoTree *findVoxel(const V3D &point) const;
 
   void StateEstimation(StatesGroup &state_propagat);
   void TransformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud,
@@ -234,6 +264,7 @@ public:
   V3F RGBFromVoxel(const V3D &input_point);
 
   void UpdateVoxelMap(const std::vector<pointWithVar> &input_points);
+  LidarMapMemoryStats collectMemoryStats() const;
 
   void BuildResidualListOMP(std::vector<pointWithVar> &pv_list, std::vector<PointToPlane> &ptpl_list);
 

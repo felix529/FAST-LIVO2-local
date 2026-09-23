@@ -4,10 +4,11 @@
     cam_width: 1280
     cam_height: 960
     scale: 1.0
-    cam_fx: 669.544
-    cam_fy: 665.5072
-    cam_cx: 658.6906
-    cam_cy: 471.3621
+    # Rectified ORLACO 60-degree camera model.
+    cam_fx: 1239.10388
+    cam_fy: 1242.87848
+    cam_cx: 651.172236
+    cam_cy: 481.641632
     #cam_d0: -0.3249
     #cam_d1: 0.1163
     #cam_d2: 0.0019

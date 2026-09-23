@@ -574,32 +574,28 @@ void VoxelMapManager::BuildVoxelMap()
   for (uint i = 0; i < plsize; i++)
   {
     const pointWithVar p_v = input_points[i];
-    float loc_xyz[3];
-    for (int j = 0; j < 3; j++)
-    {
-      loc_xyz[j] = p_v.point_w[j] / voxel_size;
-      if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
-    }
-    VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
+    const VOXEL_LOCATION position = voxelLocation(p_v.point_w, voxel_size);
     auto iter = voxel_map_.find(position);
     if (iter != voxel_map_.end())
     {
-      voxel_map_[position]->temp_points_.push_back(p_v);
-      voxel_map_[position]->new_points_++;
+      iter->second->temp_points_.push_back(p_v);
+      iter->second->new_points_++;
+      voxel_map_.touch(iter);
     }
     else
     {
-      VoxelOctoTree *octo_tree = new VoxelOctoTree(max_layer, 0, layer_init_num[0], max_points_num, planer_threshold);
-      voxel_map_[position] = octo_tree;
-      voxel_map_[position]->quater_length_ = voxel_size / 4;
-      voxel_map_[position]->voxel_center_[0] = (0.5 + position.x) * voxel_size;
-      voxel_map_[position]->voxel_center_[1] = (0.5 + position.y) * voxel_size;
-      voxel_map_[position]->voxel_center_[2] = (0.5 + position.z) * voxel_size;
-      voxel_map_[position]->temp_points_.push_back(p_v);
-      voxel_map_[position]->new_points_++;
-      voxel_map_[position]->layer_init_num_ = layer_init_num;
+      auto root = std::make_unique<VoxelOctoTree>(max_layer, 0, layer_init_num[0], max_points_num, planer_threshold);
+      root->quater_length_ = voxel_size / 4;
+      root->voxel_center_[0] = (0.5 + position.x) * voxel_size;
+      root->voxel_center_[1] = (0.5 + position.y) * voxel_size;
+      root->voxel_center_[2] = (0.5 + position.z) * voxel_size;
+      root->temp_points_.push_back(p_v);
+      root->new_points_++;
+      root->layer_init_num_ = layer_init_num;
+      voxel_map_.emplace(position, std::move(root));
     }
   }
+  voxel_map_.prune();
   for (auto iter = voxel_map_.begin(); iter != voxel_map_.end(); ++iter)
   {
     iter->second->init_octo_tree();
@@ -608,18 +604,24 @@ void VoxelMapManager::BuildVoxelMap()
 
 V3F VoxelMapManager::RGBFromVoxel(const V3D &input_point)
 {
-  int64_t loc_xyz[3];
-  for (int j = 0; j < 3; j++)
-  {
-    loc_xyz[j] = floor(input_point[j] / config_setting_.max_voxel_size_);
-  }
-
-  VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
-  int64_t ind = loc_xyz[0] + loc_xyz[1] + loc_xyz[2];
+  const VOXEL_LOCATION position = voxelLocation(input_point, config_setting_.max_voxel_size_);
+  int64_t ind = position.x + position.y + position.z;
   uint k((ind + 100000) % 3);
   V3F RGB((k == 0) * 255.0, (k == 1) * 255.0, (k == 2) * 255.0);
   // cout<<"RGB: "<<RGB.transpose()<<endl;
   return RGB;
+}
+
+VoxelOctoTree *VoxelMapManager::findVoxel(const V3D &point)
+{
+  const auto iter = voxel_map_.find(voxelLocation(point, config_setting_.max_voxel_size_));
+  return iter == voxel_map_.end() ? nullptr : iter->second.get();
+}
+
+const VoxelOctoTree *VoxelMapManager::findVoxel(const V3D &point) const
+{
+  const auto iter = voxel_map_.find(voxelLocation(point, config_setting_.max_voxel_size_));
+  return iter == voxel_map_.end() ? nullptr : iter->second.get();
 }
 
 void VoxelMapManager::UpdateVoxelMap(const std::vector<pointWithVar> &input_points)
@@ -633,27 +635,43 @@ void VoxelMapManager::UpdateVoxelMap(const std::vector<pointWithVar> &input_poin
   for (uint i = 0; i < plsize; i++)
   {
     const pointWithVar p_v = input_points[i];
-    float loc_xyz[3];
-    for (int j = 0; j < 3; j++)
-    {
-      loc_xyz[j] = p_v.point_w[j] / voxel_size;
-      if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
-    }
-    VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
+    const VOXEL_LOCATION position = voxelLocation(p_v.point_w, voxel_size);
     auto iter = voxel_map_.find(position);
-    if (iter != voxel_map_.end()) { voxel_map_[position]->UpdateOctoTree(p_v); }
+    if (iter != voxel_map_.end())
+    {
+      iter->second->UpdateOctoTree(p_v);
+      voxel_map_.touch(iter);
+    }
     else
     {
-      VoxelOctoTree *octo_tree = new VoxelOctoTree(max_layer, 0, layer_init_num[0], max_points_num, planer_threshold);
-      voxel_map_[position] = octo_tree;
-      voxel_map_[position]->layer_init_num_ = layer_init_num;
-      voxel_map_[position]->quater_length_ = voxel_size / 4;
-      voxel_map_[position]->voxel_center_[0] = (0.5 + position.x) * voxel_size;
-      voxel_map_[position]->voxel_center_[1] = (0.5 + position.y) * voxel_size;
-      voxel_map_[position]->voxel_center_[2] = (0.5 + position.z) * voxel_size;
-      voxel_map_[position]->UpdateOctoTree(p_v);
+      auto root = std::make_unique<VoxelOctoTree>(max_layer, 0, layer_init_num[0], max_points_num, planer_threshold);
+      root->layer_init_num_ = layer_init_num;
+      root->quater_length_ = voxel_size / 4;
+      root->voxel_center_[0] = (0.5 + position.x) * voxel_size;
+      root->voxel_center_[1] = (0.5 + position.y) * voxel_size;
+      root->voxel_center_[2] = (0.5 + position.z) * voxel_size;
+      root->UpdateOctoTree(p_v);
+      voxel_map_.emplace(position, std::move(root));
     }
   }
+  voxel_map_.prune();
+}
+
+LidarMapMemoryStats VoxelMapManager::collectMemoryStats() const
+{
+  LidarMapMemoryStats stats;
+  stats.root_voxels = voxel_map_.size();
+  const auto visit = [&stats](const auto &self, const VoxelOctoTree *tree) -> void
+  {
+    if (!tree) return;
+    ++stats.octree_nodes;
+    if (tree->plane_ptr_) ++stats.planes;
+    stats.buffered_points += tree->temp_points_.size();
+    stats.buffered_point_capacity += tree->temp_points_.capacity();
+    for (const auto *child : tree->leaves_) self(self, child);
+  };
+  for (const auto &entry : voxel_map_) visit(visit, entry.second.get());
+  return stats;
 }
 
 void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, std::vector<PointToPlane> &ptpl_list)
@@ -678,17 +696,11 @@ void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, s
   for (int i = 0; i < index.size(); i++)
   {
     pointWithVar &pv = pv_list[i];
-    float loc_xyz[3];
-    for (int j = 0; j < 3; j++)
-    {
-      loc_xyz[j] = pv.point_w[j] / voxel_size;
-      if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
-    }
-    VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
+    const VOXEL_LOCATION position = voxelLocation(pv.point_w, voxel_size);
     auto iter = voxel_map_.find(position);
     if (iter != voxel_map_.end())
     {
-      VoxelOctoTree *current_octo = iter->second;
+      VoxelOctoTree *current_octo = iter->second.get();
       PointToPlane single_ptpl;
       bool is_sucess = false;
       double prob = 0;
@@ -696,14 +708,14 @@ void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, s
       if (!is_sucess)
       {
         VOXEL_LOCATION near_position = position;
-        if (loc_xyz[0] > (current_octo->voxel_center_[0] + current_octo->quater_length_)) { near_position.x = near_position.x + 1; }
-        else if (loc_xyz[0] < (current_octo->voxel_center_[0] - current_octo->quater_length_)) { near_position.x = near_position.x - 1; }
-        if (loc_xyz[1] > (current_octo->voxel_center_[1] + current_octo->quater_length_)) { near_position.y = near_position.y + 1; }
-        else if (loc_xyz[1] < (current_octo->voxel_center_[1] - current_octo->quater_length_)) { near_position.y = near_position.y - 1; }
-        if (loc_xyz[2] > (current_octo->voxel_center_[2] + current_octo->quater_length_)) { near_position.z = near_position.z + 1; }
-        else if (loc_xyz[2] < (current_octo->voxel_center_[2] - current_octo->quater_length_)) { near_position.z = near_position.z - 1; }
+        if (pv.point_w[0] > (current_octo->voxel_center_[0] + current_octo->quater_length_)) { near_position.x = near_position.x + 1; }
+        else if (pv.point_w[0] < (current_octo->voxel_center_[0] - current_octo->quater_length_)) { near_position.x = near_position.x - 1; }
+        if (pv.point_w[1] > (current_octo->voxel_center_[1] + current_octo->quater_length_)) { near_position.y = near_position.y + 1; }
+        else if (pv.point_w[1] < (current_octo->voxel_center_[1] - current_octo->quater_length_)) { near_position.y = near_position.y - 1; }
+        if (pv.point_w[2] > (current_octo->voxel_center_[2] + current_octo->quater_length_)) { near_position.z = near_position.z + 1; }
+        else if (pv.point_w[2] < (current_octo->voxel_center_[2] - current_octo->quater_length_)) { near_position.z = near_position.z - 1; }
         auto iter_near = voxel_map_.find(near_position);
-        if (iter_near != voxel_map_.end()) { build_single_residual(pv, iter_near->second, 0, is_sucess, prob, single_ptpl); }
+        if (iter_near != voxel_map_.end()) { build_single_residual(pv, iter_near->second.get(), 0, is_sucess, prob, single_ptpl); }
       }
       if (is_sucess)
       {
@@ -812,7 +824,7 @@ void VoxelMapManager::pubVoxelMap()
   std::vector<VoxelPlane> pub_plane_list;
   for (auto iter = voxel_map_.begin(); iter != voxel_map_.end(); iter++)
   {
-    GetUpdatePlane(iter->second, config_setting_.max_layer_, pub_plane_list);
+    GetUpdatePlane(iter->second.get(), config_setting_.max_layer_, pub_plane_list);
   }
   for (size_t i = 0; i < pub_plane_list.size(); i++)
   {
@@ -948,16 +960,10 @@ void VoxelMapManager::mapSliding()
   //get global id now
   last_slide_position = position_last_;
   double t_sliding_start = omp_get_wtime();
-  float loc_xyz[3];
-  for (int j = 0; j < 3; j++)
-  {
-    loc_xyz[j] = position_last_[j] / config_setting_.max_voxel_size_;
-    if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
-  }
-  // VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);//discrete global
-  clearMemOutOfMap((int64_t)loc_xyz[0] + config_setting_.half_map_size, (int64_t)loc_xyz[0] - config_setting_.half_map_size,
-                    (int64_t)loc_xyz[1] + config_setting_.half_map_size, (int64_t)loc_xyz[1] - config_setting_.half_map_size,
-                    (int64_t)loc_xyz[2] + config_setting_.half_map_size, (int64_t)loc_xyz[2] - config_setting_.half_map_size);
+  const VOXEL_LOCATION position = voxelLocation(position_last_, config_setting_.max_voxel_size_);
+  clearMemOutOfMap(position.x + config_setting_.half_map_size, position.x - config_setting_.half_map_size,
+                    position.y + config_setting_.half_map_size, position.y - config_setting_.half_map_size,
+                    position.z + config_setting_.half_map_size, position.z - config_setting_.half_map_size);
   double t_sliding_end = omp_get_wtime();
   std::cout<<RED<<"[DEBUG]: Map sliding using "<<t_sliding_end - t_sliding_start<<" secs"<<RESET<<"\n";
   return;
@@ -974,8 +980,7 @@ void VoxelMapManager::clearMemOutOfMap(const int& x_max,const int& x_min,const i
     bool should_remove = loc.x > x_max || loc.x < x_min || loc.y > y_max || loc.y < y_min || loc.z > z_max || loc.z < z_min;
     if (should_remove){
       // last_delete_time = omp_get_wtime();
-      delete it->second;
-      it = voxel_map_.erase(it);
+      it = voxel_map_.erase(it); // unique_ptr recursively releases the octree.
       // delete_time += omp_get_wtime() - last_delete_time;
       delete_voxel_cout++;
     } else {

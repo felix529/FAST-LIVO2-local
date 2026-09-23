@@ -9,11 +9,14 @@
       ros_driver_bug_fix: false
 
     extrin_calib:
+      # The 18.4 deg calibration below belongs to the external /imu/data
+      # setup.  /livox/imu is the Mid-360 internal IMU: its axes are aligned
+      # with the point-cloud frame, with only the documented lever arm.
       #extrinsic_T: [0.096361, -0.005908, 0.151671]
       #extrinsic_R: [0.948836,  0.013101, 0.315498,
       #             -0.017752,  0.999772, 0.011872,
       #             -0.315270, -0.016865, 0.948852]
-      extrinsic_T: [0.0, 0.0, 0.0]
+      extrinsic_T: [-0.011, -0.02329, 0.04412]
       extrinsic_R: [1.0, 0.0, 0.0,
                     0.0, 1.0, 0.0,
                     0.0, 0.0, 1.0]
@@ -22,14 +25,16 @@
 #             0.8655, 0.0053,  0.5008] 
 #      Pcl: [-0.2444,-0.1272, 0.3227]
 
-      Rcl: [-0.0396,-0.9990,  0.0229,    # new orlaco 60, verbessert
+      Rcl: [-0.0396,-0.9990,  0.0229,    # orlaco 60
              0.6223,-0.0426, -0.7816,
-             0.7818,-0.0167,  0.6233] 
+             0.7818,-0.0167,  0.6233]
       Pcl: [-0.3126, 0.1285, 0.7812]
 
-#      Rcl: [-0.0558,-0.9982,  0.0239,    # new orlaco 120, verbessert
+      # Optional ORLACO 120 extrinsic. Use it together with
+      # camera_fisheye_ORLACO_120.yaml.
+#      Rcl: [-0.0558,-0.9982,  0.0239,     # orlaco 120
 #             0.5265,-0.0497, -0.8487,
-#             0.8483,-0.0348,  0.5283] 
+#             0.8483,-0.0348,  0.5283]
 #      Pcl: [-0.1044,-0.2049, 0.3760]
 
 
@@ -81,6 +86,11 @@
       half_map_size: 100
       sliding_thresh: 8.0
 
+    lru:
+      enabled: true
+      lidar_capacity: 30000
+      visual_capacity: 2000
+
     uav:
       imu_rate_odom: false
       gravity_align_en: true
@@ -97,7 +107,7 @@
       pose_output_en: false
 
     pcd_save:
-      pcd_save_en: true
+      pcd_save_en: false
       type: 0 # 0: World Frame, 1: Body Frame;
       colmap_output_en: false # need to set interval = -1
       filter_size_pcd: 0.15

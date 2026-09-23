@@ -11,6 +11,7 @@ which is included as part of this source code package.
 */
 
 #include "vio.h"
+#include <unordered_set>
 
 using namespace Eigen;
 VIOManager::VIOManager()
@@ -18,13 +19,38 @@ VIOManager::VIOManager()
   // downSizeFilter.setLeafSize(0.2, 0.2, 0.2);
 }
 
-VIOManager::~VIOManager()
+VIOManager::~VIOManager() = default;
+
+VisualMapMemoryStats VIOManager::collectMemoryStats() const
 {
-  delete visual_submap;
-  for (auto& pair : warp_map) delete pair.second;
-  warp_map.clear();
-  for (auto& pair : feat_map) delete pair.second;
-  feat_map.clear();
+  VisualMapMemoryStats stats;
+  stats.voxels = feat_map.size();
+  stats.warp_entries = warp_map.size();
+  std::unordered_set<const unsigned char *> image_allocations;
+  for (const auto &entry : feat_map)
+  {
+    if (!entry.second) continue;
+    for (const auto *point : entry.second->voxel_points)
+    {
+      if (!point) continue;
+      ++stats.points;
+      for (const auto *feature : point->obs_)
+      {
+        if (!feature) continue;
+        ++stats.observations;
+        if (feature->patch_) ++stats.patches;
+        const auto &img = feature->img_;
+        if (!img.empty() && image_allocations.insert(img.datastart).second)
+        {
+          ++stats.image_allocations;
+          // Account for the full shared allocation, not just the visible ROI.
+          stats.image_bytes += img.u ? img.u->size : static_cast<std::size_t>(img.dataend - img.datastart);
+        }
+      }
+    }
+  }
+  stats.patch_bytes = stats.patches * static_cast<std::size_t>(patch_size_total) * sizeof(float);
+  return stats;
 }
 
 void VIOManager::setImuToLidarExtrinsic(const V3D &transl, const M3D &rot)
@@ -41,7 +67,7 @@ void VIOManager::setLidarToCameraExtrinsic(vector<double> &R, vector<double> &P)
 
 void VIOManager::initializeVIO()
 {
-  visual_submap = new SubSparseMap;
+  visual_submap = std::make_unique<SubSparseMap>();
 
   fx = cam->fx();
   fy = cam->fy();
@@ -225,29 +251,46 @@ void VIOManager::getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level)
   }
 }
 
-void VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
+void VIOManager::insertPointIntoVoxelMap(std::unique_ptr<VisualPoint> pt_new)
 {
   V3D pt_w(pt_new->pos_[0], pt_new->pos_[1], pt_new->pos_[2]);
-  double voxel_size = 0.5;
-  float loc_xyz[3];
-  for (int j = 0; j < 3; j++)
-  {
-    loc_xyz[j] = pt_w[j] / voxel_size;
-    if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
-  }
-  VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
+  const VOXEL_LOCATION position = voxelLocation(pt_w, visual_voxel_size);
   auto iter = feat_map.find(position);
   if (iter != feat_map.end())
   {
-    iter->second->voxel_points.push_back(pt_new);
+    iter->second->voxel_points.push_back(pt_new.get());
+    pt_new.release(); // The voxel owns the point after push_back succeeds.
     iter->second->count++;
+    feat_map.touch(iter);
   }
   else
   {
-    VOXEL_POINTS *ot = new VOXEL_POINTS(0);
-    ot->voxel_points.push_back(pt_new);
-    feat_map[position] = ot;
+    auto ot = std::make_unique<VOXEL_POINTS>(0);
+    auto inserted = feat_map.emplace(position, std::move(ot));
+    // Keep pt_new as the owner until both container insertions succeed. This
+    // makes allocation failures leave either an empty voxel or no voxel, but
+    // never a leaked/double-owned VisualPoint.
+    try
+    {
+      inserted.first->second->voxel_points.push_back(pt_new.get());
+    }
+    catch (...)
+    {
+      if (inserted.second) feat_map.erase(inserted.first);
+      throw;
+    }
+    inserted.first->second->count++;
+    pt_new.release();
   }
+}
+
+std::size_t VIOManager::finishFrameAndPrune()
+{
+  if (visual_submap) visual_submap->reset();
+  std::fill(retrieve_voxel_points.begin(), retrieve_voxel_points.end(), nullptr);
+  sub_feat_map.clear();
+  total_points = 0;
+  return feat_map.prune();
 }
 
 void VIOManager::getWarpMatrixAffineHomography(const vk::AbstractCamera &cam, const V2D &px_ref, const V3D &xyz_ref, const V3D &normal_ref,
@@ -350,9 +393,11 @@ double VIOManager::calculateNCC(float *ref_patch, float *cur_patch, int patch_si
   return numerator / sqrt(demoniator1 * demoniator2 + 1e-10);
 }
 
-void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
+void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const VoxelMap &plane_map)
 {
-  if (feat_map.size() <= 0) return;
+  visual_submap->reset();
+  sub_feat_map.clear();
+  if (feat_map.empty()) return;
   double ts0 = omp_get_wtime();
 
   // pg_down->reserve(feat_map.size());
@@ -360,12 +405,10 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
   // downSizeFilter.filter(*pg_down);
 
   // resetRvizDisplay();
-  visual_submap->reset();
 
   // Controls whether to include the visual submap from the previous frame.
-  sub_feat_map.clear();
 
-  float voxel_size = 0.5;
+  const double voxel_size = visual_voxel_size;
 
   if (!normal_en) warp_map.clear();
 
@@ -376,8 +419,6 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
   // double t_insert, t_depth, t_position;
   // t_insert=t_depth=t_position=0;
-
-  int loc_xyz[3];
 
   // printf("A0. initial depthmap: %.6lf \n", omp_get_wtime() - ts0);
   // double ts1 = omp_get_wtime();
@@ -390,12 +431,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
     V3D pt_w = pg[i].point_w;
 
-    for (int j = 0; j < 3; j++)
-    {
-      loc_xyz[j] = floor(pt_w[j] / voxel_size);
-      if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
-    }
-    VOXEL_LOCATION position(loc_xyz[0], loc_xyz[1], loc_xyz[2]);
+    const VOXEL_LOCATION position = voxelLocation(pt_w, voxel_size);
 
     // t_position += omp_get_wtime()-t0;
     // double t1 = omp_get_wtime();
@@ -506,13 +542,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
         V3D sample_point_w = new_frame_->f2w(it);
         // sample_points_temp.push_back(sample_point_w);
 
-        for (int j = 0; j < 3; j++)
-        {
-          loc_xyz[j] = floor(sample_point_w[j] / voxel_size);
-          if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
-        }
-
-        VOXEL_LOCATION sample_pos(loc_xyz[0], loc_xyz[1], loc_xyz[2]);
+        const VOXEL_LOCATION sample_pos = voxelLocation(sample_point_w, voxel_size);
 
         auto corre_sub_feat_map = sub_feat_map.find(sample_pos);
         if (corre_sub_feat_map != sub_feat_map.end()) break;
@@ -569,8 +599,8 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
         }
         else
         {
-          VOXEL_LOCATION sample_pos(loc_xyz[0], loc_xyz[1], loc_xyz[2]);
-          auto iter = plane_map.find(sample_pos);
+          const VOXEL_LOCATION lidar_position = voxelLocation(sample_point_w, lidar_voxel_size);
+          auto iter = plane_map.find(lidar_position);
           if (iter != plane_map.end())
           {
             VoxelOctoTree *current_octo;
@@ -666,13 +696,13 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
           for (auto it = pt->obs_.begin(), ite = pt->obs_.end(); it != ite; ++it)
           {
             Feature *ref_patch_temp = *it;
-            float *patch_temp = ref_patch_temp->patch_;
+            float *patch_temp = ref_patch_temp->patch_.get();
             float phtometric_errors = 0.0;
             int count = 0;
             for (auto itm = pt->obs_.begin(), itme = pt->obs_.end(); itm != itme; ++itm)
             {
               if ((*itm)->id_ == ref_patch_temp->id_) continue;
-              float *patch_cache = (*itm)->patch_;
+              float *patch_cache = (*itm)->patch_.get();
 
               for (int ind = 0; ind < patch_size_total; ind++)
               {
@@ -729,8 +759,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
           search_level = getBestSearchLevel(A_cur_ref_zero, 2);
 
-          Warp *ot = new Warp(search_level, A_cur_ref_zero);
-          warp_map[ref_ftr->id_] = ot;
+          warp_map[ref_ftr->id_] = std::make_unique<Warp>(search_level, A_cur_ref_zero);
         }
       }
       // t_4 += omp_get_wtime() - t_1;
@@ -769,6 +798,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       visual_submap->errors.push_back(error);
       visual_submap->warp_patch.push_back(patch_wrap);
       visual_submap->inv_expo_list.push_back(ref_ftr->inv_expo_time_);
+      feat_map.touch(voxelLocation(pt->pos_, visual_voxel_size));
 
       // t_5 += omp_get_wtime() - t_1;
     }
@@ -872,18 +902,19 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
       // if(std::fabs(cos_theta)<0.34) continue; // 70 degree
       V2D pc(new_frame_->w2c(pt));
 
-      float *patch = new float[patch_size_total];
-      getImagePatch(img, pc, patch, 0);
+      auto patch = std::make_unique<float[]>(patch_size_total);
+      getImagePatch(img, pc, patch.get(), 0);
 
-      VisualPoint *pt_new = new VisualPoint(pt);
+      auto pt_new = std::make_unique<VisualPoint>(pt);
 
       Vector3d f = cam->cam2world(pc);
-      Feature *ftr_new = new Feature(pt_new, patch, pc, f, new_frame_->T_f_w_, 0);
+      auto ftr_new = std::make_unique<Feature>(pt_new.get(), std::move(patch), pc, f, new_frame_->T_f_w_, 0);
       ftr_new->img_ = img;
       ftr_new->id_ = new_frame_->id_;
       ftr_new->inv_expo_time_ = state->inv_expo_time;
 
-      pt_new->addFrameRef(ftr_new);
+      pt_new->addFrameRef(ftr_new.get());
+      ftr_new.release(); // VisualPoint owns observations after insertion.
       pt_new->covariance_ = pt_var.var;
       pt_new->is_normal_initialized_ = true;
 
@@ -892,7 +923,7 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
       
       pt_new->previous_normal_ = pt_new->normal_;
 
-      insertPointIntoVoxelMap(pt_new);
+      insertPointIntoVoxelMap(std::move(pt_new));
       add += 1;
       // map_cur_frame.push_back(pt_new);
     }
@@ -925,8 +956,6 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
     V2D pc(new_frame_->w2c(pt->pos_));
     bool add_flag = false;
     
-    float *patch_temp = new float[patch_size_total];
-    getImagePatch(img, pc, patch_temp, 0);
     // TODO: condition: distance and view_angle
     // Step 1: time
     Feature *last_feature = pt->obs_.back();
@@ -954,20 +983,24 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
     }
     if (add_flag)
     {
+      // Allocate only when this observation will be retained.
+      auto patch_temp = std::make_unique<float[]>(patch_size_total);
+      getImagePatch(img, pc, patch_temp.get(), 0);
       update_num += 1;
       update_flag[i] = 1;
       Vector3d f = cam->cam2world(pc);
-      Feature *ftr_new = new Feature(pt, patch_temp, pc, f, new_frame_->T_f_w_, visual_submap->search_levels[i]);
+      auto ftr_new = std::make_unique<Feature>(pt, std::move(patch_temp), pc, f, new_frame_->T_f_w_, visual_submap->search_levels[i]);
       ftr_new->img_ = img;
       ftr_new->id_ = new_frame_->id_;
       ftr_new->inv_expo_time_ = state->inv_expo_time;
-      pt->addFrameRef(ftr_new);
+      pt->addFrameRef(ftr_new.get());
+      ftr_new.release();
     }
   }
   printf("[ VIO ] Update %d points in visual submap\n", update_num);
 }
 
-void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
+void VIOManager::updateReferencePatch(const VoxelMap &plane_map)
 {
   if (total_points == 0) return;
 
@@ -981,13 +1014,7 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
     if (update_flag[i] == 0) continue;
 
     const V3D &p_w = pt->pos_;
-    float loc_xyz[3];
-    for (int j = 0; j < 3; j++)
-    {
-      loc_xyz[j] = p_w[j] / 0.5;
-      if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
-    }
-    VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
+    const VOXEL_LOCATION position = voxelLocation(p_w, lidar_voxel_size);
     auto iter = plane_map.find(position);
     if (iter != plane_map.end())
     {
@@ -1038,7 +1065,7 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
     for (auto it = pt->obs_.begin(), ite = pt->obs_.end(); it != ite; ++it)
     {
       Feature *ref_patch_temp = *it;
-      float *patch_temp = ref_patch_temp->patch_;
+      float *patch_temp = ref_patch_temp->patch_.get();
       float NCC_up = 0.0;
       float NCC_down1 = 0.0;
       float NCC_down2 = 0.0;
@@ -1063,7 +1090,7 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
       for (auto itm = pt->obs_.begin(), itme = pt->obs_.end(); itm != itme; ++itm)
       {
         if ((*itm)->id_ == ref_patch_temp->id_) continue;
-        float *patch_cache = (*itm)->patch_;
+        float *patch_cache = (*itm)->patch_.get();
 
         float other_mean;
         if (abs((*itm)->mean_) < 1e-6)
@@ -1100,7 +1127,7 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
   }
 }
 
-void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
+void VIOManager::projectPatchFromRefToCur(const VoxelMap &plane_map)
 {
   if (total_points == 0) return;
   // if(new_frame_->id_ != 2) return; //124
@@ -1784,7 +1811,7 @@ void VIOManager::dumpDataForColmap()
   cnt++;
 }
 
-void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
+void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const VoxelMap &plane_map, double img_time)
 {
   if (width != img.cols || height != img.rows)
   {
@@ -1804,7 +1831,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   double t1 = omp_get_wtime();
 
-  retrieveFromVisualSparseMap(img, pg, feat_map);
+  retrieveFromVisualSparseMap(img, pg, plane_map);
 
   double t2 = omp_get_wtime();
 
@@ -1818,7 +1845,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   
   plotTrackedPoints();
 
-  if (plot_flag) projectPatchFromRefToCur(feat_map);
+  if (plot_flag) projectPatchFromRefToCur(plane_map);
 
   double t5 = omp_get_wtime();
 
@@ -1826,11 +1853,15 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   double t6 = omp_get_wtime();
 
-  updateReferencePatch(feat_map);
+  updateReferencePatch(plane_map);
 
   double t7 = omp_get_wtime();
   
   if(colmap_output_en)  dumpDataForColmap();
+
+  // All frame-local raw pointers have had their final consumer. Clear them
+  // before evicting visual voxels so capacity 1 is safe as well.
+  finishFrameAndPrune();
 
   frame_count++;
   ave_total = ave_total * (frame_count - 1) / frame_count + (t7 - t1 - (t5 - t4)) / frame_count;
@@ -1852,7 +1883,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
   printf("\033[1;34m|                         VIO Time                            |\033[0m\n");
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
+  printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Visual Map Voxels", feat_map.size());
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
   printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");

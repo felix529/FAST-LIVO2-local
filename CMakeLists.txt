@@ -31,8 +31,8 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|aarch64|ARM|AARCH64)")
   add_definitions(-DARM_ARCH)
 else()
   # x86-64 (Intel/AMD) optimizations
-  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -mtune=native -funroll-loops") #-flto
-  message(STATUS "Using general x86 optimizations: -O3 -march=native -mtune=native -funroll-loops") 
+  set(CMAKE_CXX_FLAGS_RELEASE "-O2 -g -DNDEBUG -march=x86-64 -mtune=generic -fno-omit-frame-pointer") #-flto
+  message(STATUS "Using portable x86-64 Release flags: -O2 -g -DNDEBUG -fno-omit-frame-pointer")
   add_definitions(-DX86_ARCH)
 endif()
 
@@ -225,5 +225,15 @@ ament_export_dependencies(
   OpenCV 
   Sophus
 )
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_memory_lifecycle test/test_memory_lifecycle.cpp)
+  ament_target_dependencies(test_memory_lifecycle ${dependencies})
+  target_link_libraries(test_memory_lifecycle
+    vio lio pre ${VIKIT_COMMON_LIBRARY} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES}
+    ${COMMON_DEPENDENCIES}
+  )
+endif()
 
 ament_package()

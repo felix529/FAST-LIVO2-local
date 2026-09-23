@@ -71,6 +71,8 @@ public:
   std::vector<VisualPoint *> voxel_points;
   int count;
   VOXEL_POINTS(int num) : count(num) {}
+  VOXEL_POINTS(const VOXEL_POINTS &) = delete;
+  VOXEL_POINTS &operator=(const VOXEL_POINTS &) = delete;
   ~VOXEL_POINTS() 
   { 
     for (VisualPoint* vp : voxel_points) 
@@ -83,9 +85,27 @@ public:
 class VIOManager
 {
 public:
+  struct CameraDeleter
+  {
+    void operator()(vk::AbstractCamera *camera) const noexcept
+    {
+      if (!camera) return;
+      // vikit_ros is C++17 and allocates with global new, while the installed
+      // vikit_common camera destructors were built as C++11 with Eigen's
+      // class-specific aligned delete. Invoke the virtual destructor without
+      // its deleting wrapper, then pair the allocation with global delete.
+      camera->~AbstractCamera();
+      ::operator delete(static_cast<void *>(camera));
+    }
+  };
+
   int grid_size;
-  vk::AbstractCamera *cam;
-  vk::PinholeCamera *pinhole_cam;
+  // camera_loader allocates with new. Keep a raw view for the existing VIO
+  // code and explicit ownership for production; tests may still inject a
+  // borrowed stack camera without populating owned_cam.
+  vk::AbstractCamera *cam = nullptr;
+  vk::PinholeCamera *pinhole_cam = nullptr;
+  std::unique_ptr<vk::AbstractCamera, CameraDeleter> owned_cam;
   StatesGroup *state;
   StatesGroup *state_propagat;
   M3D Rli, Rci, Rcl, Rcw, Jdphi_dR, Jdp_dt, Jdp_dR;
@@ -103,15 +123,15 @@ public:
   int width, height, grid_n_width, grid_n_height, length;
   double image_resize_factor;
   double fx, fy, cx, cy;
-  int patch_pyrimid_level, patch_size, patch_size_total, patch_size_half, border, warp_len;
+  int patch_pyrimid_level, patch_size, patch_size_total = 0, patch_size_half, border, warp_len;
   int max_iterations, total_points;
 
   double img_point_cov, outlier_threshold, ncc_thre;
   
-  SubSparseMap *visual_submap;
+  std::unique_ptr<SubSparseMap> visual_submap;
   std::vector<std::vector<V3D>> rays_with_sample_points;
 
-  double compute_jacobian_time, update_ekf_time;
+  double compute_jacobian_time = 0.0, update_ekf_time = 0.0;
   double ave_total = 0;
   // double ave_build_residual_time = 0;
   // double ave_ekf_time = 0;
@@ -123,13 +143,16 @@ public:
   Eigen::MatrixXd K, H_sub_inv;
 
   ofstream fout_camera, fout_colmap;
-  unordered_map<VOXEL_LOCATION, VOXEL_POINTS *> feat_map;
+  using VisualVoxelMap = LruMap<VOXEL_LOCATION, VOXEL_POINTS>;
+  VisualVoxelMap feat_map;
   unordered_map<VOXEL_LOCATION, int> sub_feat_map; 
-  unordered_map<int, Warp *> warp_map;
+  unordered_map<int, std::unique_ptr<Warp>> warp_map;
   vector<VisualPoint *> retrieve_voxel_points;
   vector<pointWithVar> append_voxel_points;
   FramePtr new_frame_;
   cv::Mat img_cp, img_rgb, img_test;
+  double visual_voxel_size = 0.5;
+  double lidar_voxel_size = 0.5;
 
   enum CellType
   {
@@ -140,10 +163,20 @@ public:
 
   VIOManager();
   ~VIOManager();
+  VIOManager(const VIOManager &) = delete;
+  VIOManager &operator=(const VIOManager &) = delete;
+  void takeCameraOwnership(vk::AbstractCamera *camera)
+  {
+    owned_cam.reset(camera);
+    cam = owned_cam.get();
+  }
+  VisualMapMemoryStats collectMemoryStats() const;
+  void configureLru(bool enabled, std::size_t capacity) { feat_map.configure(enabled, capacity); }
+  std::size_t finishFrameAndPrune();
   void updateStateInverse(cv::Mat img, int level);
   void updateState(cv::Mat img, int level);
-  void processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time);
-  void retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
+  void processFrame(cv::Mat &img, vector<pointWithVar> &pg, const VoxelMap &plane_map, double img_time);
+  void retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const VoxelMap &plane_map);
   void generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg);
   void setImuToLidarExtrinsic(const V3D &transl, const M3D &rot);
   void setLidarToCameraExtrinsic(vector<double> &R, vector<double> &P);
@@ -160,11 +193,11 @@ public:
                                      const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref);
   void warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
                   const int pyramid_level, const int halfpatch_size, float *patch);
-  void insertPointIntoVoxelMap(VisualPoint *pt_new);
+  void insertPointIntoVoxelMap(std::unique_ptr<VisualPoint> pt_new);
   void plotTrackedPoints();
   void updateFrameState(StatesGroup state);
-  void projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
-  void updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
+  void projectPatchFromRefToCur(const VoxelMap &plane_map);
+  void updateReferencePatch(const VoxelMap &plane_map);
   void precomputeReferencePatches(int level);
   void dumpDataForColmap();
   double calculateNCC(float *ref_patch, float *cur_patch, int patch_size);
