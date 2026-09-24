@@ -30,9 +30,16 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|aarch64|ARM|AARCH64)")
   endif()
   add_definitions(-DARM_ARCH)
 else()
-  # x86-64 (Intel/AMD) optimizations
-  set(CMAKE_CXX_FLAGS_RELEASE "-O2 -g -DNDEBUG -march=x86-64 -mtune=generic -fno-omit-frame-pointer") #-flto
-  message(STATUS "Using portable x86-64 Release flags: -O2 -g -DNDEBUG -fno-omit-frame-pointer")
+  # Build on each robot, so use its SIMD/CPU instructions by default. The
+  # portable switch remains available for redistributable x86-64 binaries.
+  option(FAST_LIVO_NATIVE_OPTIMIZATION "Use native x86-64 Release optimizations" ON)
+  if(FAST_LIVO_NATIVE_OPTIMIZATION)
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -march=native -mtune=native")
+    message(STATUS "Using native x86-64 Release flags: -O3 -march=native -mtune=native")
+  else()
+    set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG -march=x86-64 -mtune=generic")
+    message(STATUS "Using portable x86-64 Release flags: -O2 -march=x86-64 -mtune=generic")
+  endif()
   add_definitions(-DX86_ARCH)
 endif()
 

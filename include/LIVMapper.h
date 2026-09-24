@@ -27,6 +27,7 @@ which is included as part of this source code package.
 #include <nav_msgs/msg/path.hpp>
 #include <vikit/camera_loader.h>
 #include <chrono>
+#include <thread>
 
 class LIVMapper
 {
@@ -183,6 +184,9 @@ public:
   image_transport::Publisher pubImage;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr mavros_pose_publisher;
   rclcpp::TimerBase::SharedPtr imu_prop_timer;
+  rclcpp::CallbackGroup::SharedPtr lidar_callback_group_;
+  rclcpp::CallbackGroup::SharedPtr imu_callback_group_;
+  rclcpp::CallbackGroup::SharedPtr image_callback_group_;
   rclcpp::Node::SharedPtr node;
 
   int frame_num = 0;
@@ -199,7 +203,7 @@ private:
   bool lru_enabled_ = true;
   int64_t lidar_lru_capacity_ = 30000;
   int64_t visual_lru_capacity_ = 2000;
-  bool verbose_logging_ = false;
+  bool verbose_logging_ = true;
   double path_publish_interval_sec_ = 0.5;
   std::chrono::steady_clock::time_point next_memory_stats_{};
   std::chrono::steady_clock::time_point next_path_publish_{};

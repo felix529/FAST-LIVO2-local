@@ -95,6 +95,9 @@
       imu_rate_odom: false
       gravity_align_en: true
 
+    debug:
+      verbose: true
+
     publish:
       dense_map_en: true
       pub_effect_point_en: false 
