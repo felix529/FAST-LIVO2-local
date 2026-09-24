@@ -417,8 +417,11 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       total_residual += fabs(ptpl_list_[i].dis_to_plane_);
     }
     effct_feat_num_ = ptpl_list_.size();
-    cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_ 
-         << " effective feature num: " << effct_feat_num_ << " average residual: " << total_residual / effct_feat_num_ << endl;
+    if (verbose_logging)
+    {
+      cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_
+           << " effective feature num: " << effct_feat_num_ << " average residual: " << total_residual / effct_feat_num_ << '\n';
+    }
 
     /*** Computation of Measuremnt Jacobian matrix H and measurents covarience
      * ***/
@@ -953,7 +956,7 @@ void VoxelMapManager::mapSliding()
 {
   if((position_last_ - last_slide_position).norm() < config_setting_.sliding_thresh)
   {
-    std::cout<<RED<<"[DEBUG]: Last sliding length "<<(position_last_ - last_slide_position).norm()<<RESET<<"\n";
+    if (verbose_logging) std::cout << RED << "[DEBUG]: Last sliding length " << (position_last_ - last_slide_position).norm() << RESET << "\n";
     return;
   }
 
@@ -965,7 +968,7 @@ void VoxelMapManager::mapSliding()
                     position.y + config_setting_.half_map_size, position.y - config_setting_.half_map_size,
                     position.z + config_setting_.half_map_size, position.z - config_setting_.half_map_size);
   double t_sliding_end = omp_get_wtime();
-  std::cout<<RED<<"[DEBUG]: Map sliding using "<<t_sliding_end - t_sliding_start<<" secs"<<RESET<<"\n";
+  if (verbose_logging) std::cout << RED << "[DEBUG]: Map sliding using " << t_sliding_end - t_sliding_start << " secs" << RESET << "\n";
   return;
 }
 
@@ -987,6 +990,6 @@ void VoxelMapManager::clearMemOutOfMap(const int& x_max,const int& x_min,const i
       ++it;
     }
   }
-  std::cout<<RED<<"[DEBUG]: Delete "<<delete_voxel_cout<<" root voxels"<<RESET<<"\n";
+  if (verbose_logging) std::cout << RED << "[DEBUG]: Delete " << delete_voxel_cout << " root voxels" << RESET << "\n";
   // std::cout<<RED<<"[DEBUG]: Delete "<<delete_voxel_cout<<" voxels using "<<delete_time<<" s"<<RESET<<"\n";
 }

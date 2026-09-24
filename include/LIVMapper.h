@@ -199,6 +199,9 @@ private:
   bool lru_enabled_ = true;
   int64_t lidar_lru_capacity_ = 30000;
   int64_t visual_lru_capacity_ = 2000;
+  bool verbose_logging_ = false;
+  double path_publish_interval_sec_ = 0.5;
   std::chrono::steady_clock::time_point next_memory_stats_{};
+  std::chrono::steady_clock::time_point next_path_publish_{};
 };
 #endif

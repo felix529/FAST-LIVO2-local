@@ -214,6 +214,7 @@ public:
   VoxelMapManager(const VoxelMapManager &) = delete;
   VoxelMapManager &operator=(const VoxelMapManager &) = delete;
   VoxelMapConfig config_setting_;
+  bool verbose_logging = false;
   int current_frame_id_ = 0;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr voxel_map_pub_;
   VoxelMap voxel_map_;
